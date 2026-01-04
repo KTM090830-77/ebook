@@ -203,103 +203,241 @@ class _CalendarPageState extends State<CalendarPage> {
     return null;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final year = currentMonth.year;
-    final month = currentMonth.month;
+  // Google Books에서 제목으로 검색하여 (title, authors, thumbnail) 리스트를 반환
+  Future<List<Map<String, String>>> _searchBooksApi(String query) async {
+    if (query.trim().isEmpty) return [];
+    try {
+      final q = Uri.https('www.googleapis.com', '/books/v1/volumes', {
+        'q': 'intitle:$query',
+        'maxResults': '5',
+      });
+      final res = await http.get(q).timeout(const Duration(seconds: 6));
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        final items = body['items'] as List<dynamic>?;
+        if (items != null && items.isNotEmpty) {
+          final results = <Map<String, String>>[];
+          for (final it in items) {
+            final info = it['volumeInfo'] as Map<String, dynamic>?;
+            if (info == null) continue;
+            final title = (info['title'] ?? '').toString();
+            final authors = (info['authors'] is List) ? (info['authors'] as List).join(", ") : (info['authors']?.toString() ?? "");
+            String thumbnail = "";
+            try {
+              final imageLinks = info['imageLinks'] as Map<String, dynamic>?;
+              if (imageLinks != null) {
+                thumbnail = (imageLinks['thumbnail'] ?? imageLinks['smallThumbnail'] ?? "").toString();
+                // 일부 썸네일 URL이 http일 수 있으므로 https로 보정
+                if (thumbnail.isNotEmpty && thumbnail.startsWith('http:')) {
+                  thumbnail = thumbnail.replaceFirst('http:', 'https:');
+                }
+              }
+            } catch (_) {
+              thumbnail = "";
+            }
+            if (title.isNotEmpty) {
+              results.add({'title': title, 'authors': authors, 'thumbnail': thumbnail});
+            }
+          }
+          return results;
+        }
+      }
+    } catch (_) {}
+    return [];
+  }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("독서캘린더"),
-        centerTitle: true,
-      ),
-      body: Column(
-        children: [
-          /// 월간 / 주간 UI (간단 유지)
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(border: Border.all(color: Colors.black12)),
-                  child: const Text("월간"),
-                ),
-              ),
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(border: Border.all(color: Colors.black12)),
-                  child: const Text("주간"),
-                ),
-              ),
-            ],
-          ),
+  // 특정 컨트롤러 인덱스(i)에 대해 검색을 수행하고 결과 선택 UI를 띄움
+  Future<void> _onSearchForController(int i, List<TextEditingController> bookControllers) async {
+    final current = bookControllers[i].text.trim();
+    // 로딩 표시
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    final results = await _searchBooksApi(current);
+    Navigator.pop(context); // 로딩 닫기
 
-          // 월 표시 + prev/next
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-            decoration: BoxDecoration(border: Border.all(color: Colors.black12)),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    if (results.isEmpty) {
+      // 결과 없음 -> 원래 텍스트를 그대로 사용하도록 안내
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("검색 결과 없음"),
+          content: Text(current.isEmpty ? "검색어가 비어 있습니다. 직접 입력하여 추가하세요." : "검색 결과가 없습니다.\n\"$current\" 를 그대로 사용하시겠습니까?"),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("취소")),
+            TextButton(
+              onPressed: () {
+                // 그대로 사용: 아무것도 안함(필드에 이미 입력되어 있음)
+                Navigator.pop(ctx);
+              },
+              child: const Text("그대로 사용"),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    // 변경: 가로 스크롤하는 카드형 리스트 다이얼로그
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return Dialog(
+          insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 24),
+          child: SizedBox(
+            height: 460,
+            child: Column(
               children: [
-                IconButton(
-                  icon: const Icon(Icons.chevron_left),
-                  onPressed: () {
-                    setState(() {
-                      currentMonth = DateTime(year, month - 1);
-                    });
-                  },
+                // 가로 스크롤 리스트
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: results.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 12),
+                      itemBuilder: (c, idx) {
+                        final item = results[idx];
+                        final thumb = item['thumbnail'] ?? "";
+                        final title = item['title'] ?? "";
+                        final authors = item['authors'] ?? "";
+                        return GestureDetector(
+                          onTap: () {
+                            bookControllers[i].text = title;
+                            Navigator.pop(ctx);
+                          },
+                          child: SizedBox(
+                            width: 260,
+                            child: Card(
+                              clipBehavior: Clip.hardEdge,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              child: Stack(
+                                children: [
+                                  // 표지 이미지
+                                  Positioned.fill(
+                                    child: thumb.isNotEmpty
+                                        ? Image.network(
+                                            thumb,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (c, e, s) => Container(
+                                              color: Colors.black12,
+                                              alignment: Alignment.center,
+                                              child: const Icon(Icons.broken_image, size: 48),
+                                            ),
+                                          )
+                                        : Container(
+                                            color: Colors.black12,
+                                            alignment: Alignment.center,
+                                            child: const Icon(Icons.book, size: 64),
+                                          ),
+                                  ),
+                                  // 하단 반투명 오버레이: 제목/저자
+                                  Positioned(
+                                    left: 0,
+                                    right: 0,
+                                    bottom: 0,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+                                      color: Colors.black.withOpacity(0.55),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                          if (authors.isNotEmpty)
+                                            Text(authors, style: const TextStyle(color: Colors.white70), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  // 우측 상단 작은 '선택' 버튼 (옵션)
+                                  Positioned(
+                                    right: 8,
+                                    top: 8,
+                                    child: Container(
+                                      decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(6)),
+                                      child: IconButton(
+                                        icon: const Icon(Icons.check, color: Colors.white, size: 20),
+                                        onPressed: () {
+                                          bookControllers[i].text = title;
+                                          Navigator.pop(ctx);
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
                 ),
-                Text("${year}년 ${month}월", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                IconButton(
-                  icon: const Icon(Icons.chevron_right),
-                  onPressed: () {
-                    setState(() {
-                      currentMonth = DateTime(year, month + 1);
-                    });
-                  },
+
+                // 취소 버튼
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12, right: 12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("취소")),
+                    ],
+                  ),
                 ),
               ],
             ),
           ),
-
-          // 기본 CalendarDatePicker로 교체: 레이아웃/크기 문제 해소
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: SizedBox(
-              height: 360,
-              child: Card(
-                margin: const EdgeInsets.symmetric(horizontal: 12),
-                child: Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: Builder(builder: (context) {
-                    final now = DateTime.now();
-                    final initialForPicker = (currentMonth.year == now.year && currentMonth.month == now.month)
-                        ? now
-                        : DateTime(year, month, 1);
-
-                    return CalendarDatePicker(
-                      key: ValueKey("${currentMonth.year}-${currentMonth.month}-${widget.weekStartMonday}"),
-                      initialDate: initialForPicker,
-                      firstDate: DateTime(2000),
-                      lastDate: DateTime(2100),
-                      currentDate: DateTime.now(),
-                      onDateChanged: (d) => openInput(d),
-                    );
-                  }),
-                ),
-              ),
-            ),
-          ),
-
-          // 남은 공간(필요 시 통계 위젯을 별도 페이지에서 제공)
-          const SizedBox(height: 12),
-        ],
-      ),
+        );
+      },
     );
+  }
+
+  // 추가: 시간 입력 파서 및 포맷 유틸
+  // 허용 형식 예시:
+  // - "2시간 30분", "2시간30분", "2시 30분" (한글)
+  // - "2:30", "2.5" (간단 지원하지 않음) -> 숫자만 입력하면 분으로 처리
+  // - "150" -> 150분
+  int _parseTimeInput(String s) {
+    final st = s.trim();
+    if (st.isEmpty) return 0;
+
+    // 시/분 한글 패턴
+    final regKor = RegExp(r'(?:(\d+)\s*(?:시간|시))?\s*(?:(\d+)\s*(?:분))?');
+    final mKor = regKor.firstMatch(st);
+    if (mKor != null && (mKor.group(1) != null || mKor.group(2) != null)) {
+      final h = int.tryParse(mKor.group(1) ?? '') ?? 0;
+      final mm = int.tryParse(mKor.group(2) ?? '') ?? 0;
+      return h * 60 + mm;
+    }
+
+    // "HH:MM" 형식
+    final regColon = RegExp(r'^(\d+)\s*[:]\s*(\d+)$');
+    final mCol = regColon.firstMatch(st);
+    if (mCol != null) {
+      final h = int.tryParse(mCol.group(1) ?? '') ?? 0;
+      final mm = int.tryParse(mCol.group(2) ?? '') ?? 0;
+      return h * 60 + mm;
+    }
+
+    // 순수 숫자(분)
+    final numOnly = int.tryParse(st.replaceAll(RegExp(r'[^0-9]'), ''));
+    if (numOnly != null) return numOnly;
+
+    return 0;
+  }
+
+  String _formatMinutes(int minutes) {
+    if (minutes <= 0) return "";
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    if (h > 0) {
+      if (m > 0) return "${h}시간 ${m}분";
+      return "${h}시간";
+    }
+    return "${m}분";
   }
 
   void openInput(DateTime date) {
@@ -313,13 +451,21 @@ class _CalendarPageState extends State<CalendarPage> {
         ? List<String>.from(records[k]!['times'].map((e) => e.toString()))
         : <String>[];
 
-    // <-- 변경점: controllers를 빌더 바깥에서 한 번만 생성하여 재빌드 시에도 유지되게 함
+    // <-- controllers를 빌더 바깥에서 한 번만 생성하여 재빌드 시에도 유지되게 함
     final List<TextEditingController> bookControllers = [
       for (var b in initialBooks) TextEditingController(text: b),
     ];
+
+    // 변경: 저장된 분(문자열)을 표시할 때 "X시간 Y분" 형식으로 보여주도록 변환
     final List<TextEditingController> timeControllers = [
-      for (var t in initialTimes) TextEditingController(text: t),
+      for (var t in initialTimes)
+        TextEditingController(
+            text: () {
+              final minutes = int.tryParse(t.trim()) ?? 0;
+              return minutes > 0 ? _formatMinutes(minutes) : t;
+            }())
     ];
+
     // 항상 최소 하나의 쌍을 유지
     if (bookControllers.isEmpty) {
       bookControllers.add(TextEditingController());
@@ -361,15 +507,28 @@ class _CalendarPageState extends State<CalendarPage> {
                             ),
                           ),
                           const SizedBox(width: 8),
+
+                          // 검색 버튼 추가: 검색 결과 있으면 선택, 없으면 그대로 사용 가능
+                          IconButton(
+                            icon: const Icon(Icons.search),
+                            tooltip: "Google Books에서 검색",
+                            onPressed: () async {
+                              await _onSearchForController(i, bookControllers);
+                              // TextField가 controller 변경을 반영하므로 다이얼로그 내 재렌더링 필요 시 호출
+                              dialogSetState(() {});
+                            },
+                          ),
+
+                          const SizedBox(width: 8),
                           Expanded(
                             flex: 1,
                             child: TextField(
                               controller: timeControllers[i],
                               decoration: const InputDecoration(
-                                labelText: "분",
-                                hintText: "0",
+                                labelText: "시간 (예: 2시간 30분 또는 150)",
+                                hintText: "예: 1시간 20분 또는 80",
                               ),
-                              keyboardType: TextInputType.number,
+                              keyboardType: TextInputType.text,
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -414,20 +573,22 @@ class _CalendarPageState extends State<CalendarPage> {
                 child: const Text("취소")),
             ElevatedButton(
               onPressed: () async {
-                // 저장 처리: 인덱스별로 책/시간 쌍을 확인하여, 둘 다 비어있지 않거나 하나라도 값이 있으면 포함
+                // 저장 처리: 입력 문자열을 파싱하여 분으로 변환 (유효한 분 > 0인 항목만 저장)
                 final List<String> books = [];
                 final List<String> times = [];
                 final len = bookControllers.length;
                 for (var i = 0; i < len; i++) {
                   final b = bookControllers[i].text.trim();
-                  final t = timeControllers.length > i ? timeControllers[i].text.trim() : "";
-                  if (b.isNotEmpty || t.isNotEmpty) {
+                  final tRaw = timeControllers.length > i ? timeControllers[i].text.trim() : "";
+                  final minutes = _parseTimeInput(tRaw);
+                  if (minutes > 0) {
                     books.add(b);
-                    times.add(t);
+                    times.add(minutes.toString());
                   }
                 }
 
-                if (books.isEmpty && times.isEmpty) {
+                if (books.isEmpty) {
+                  // 모든 항목이 비어(또는 유효한 시간이 없어)졌다면 해당 날짜 레코드 삭제
                   if (records.containsKey(k)) {
                     records.remove(k);
                     await saveData();
@@ -447,10 +608,95 @@ class _CalendarPageState extends State<CalendarPage> {
       }),
     );
   }
-}
+
+  // 새로 추가: CalendarPage UI (CalendarDatePicker 기반)
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+
+    // 안전하게 initialDate 결정: currentMonth가 현재 달이면 '오늘'을, 아니면 해당 월의 1일을 사용
+    DateTime initialDate;
+    if (currentMonth.year == now.year && currentMonth.month == now.month) {
+      // 오늘 날짜가 해당 월의 마지막 일을 넘지 않도록 보정
+      final lastDay = DateTime(currentMonth.year, currentMonth.month + 1, 0).day;
+      final safeDay = now.day <= lastDay ? now.day : lastDay;
+      initialDate = DateTime(currentMonth.year, currentMonth.month, safeDay);
+    } else {
+      initialDate = DateTime(currentMonth.year, currentMonth.month, 1);
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("캘린더"),
+      ),
+      body: Column(
+        children: [
+          // 월 이동 컨트롤
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.chevron_left),
+                  onPressed: () {
+                    setState(() {
+                      currentMonth = DateTime(currentMonth.year, currentMonth.month - 1, 1);
+                    });
+                  },
+                ),
+                Expanded(
+                  child: Center(
+                    child: Text(
+                      "${currentMonth.year}년 ${currentMonth.month}월",
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.chevron_right),
+                  onPressed: () {
+                    setState(() {
+                      currentMonth = DateTime(currentMonth.year, currentMonth.month + 1, 1);
+                    });
+                  },
+                ),
+              ],
+            ),
+          ),
+
+          // 기본 Flutter 캘린더
+          // key를 month 단위로 주어 currentMonth 변경 시 캘린더가 재표시되도록 함
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: CalendarDatePicker(
+                key: ValueKey("${currentMonth.year}-${currentMonth.month}"),
+                initialDate: initialDate,
+                firstDate: DateTime(2000),
+                lastDate: DateTime(2100),
+                currentDate: DateTime.now(),
+                onDateChanged: (date) {
+                  // 날짜 선택 시 입력 다이얼로그 호출
+                  openInput(date);
+                },
+                onDisplayedMonthChanged: (displayedDate) {
+                  // 사용자가 달을 넘겼을 때 currentMonth 동기화
+                  setState(() {
+                    currentMonth = DateTime(displayedDate.year, displayedDate.month, 1);
+                  });
+                },
+              ),
+            ),
+          ),
+        ],
+      )
+      );
+    }
+  }
+
 
 ////////////////////////////////////////////////////
-/// 📊 통계 페이지 - 월별 목록 + 이번 주 그래프
+///  📊 통계 페이지 - 월별 목록 + 이번 주 그래프
 ////////////////////////////////////////////////////
 class StatsPage extends StatefulWidget {
   const StatsPage({super.key});
@@ -637,6 +883,40 @@ class _StatsPageState extends State<StatsPage> {
     return genreTotals;
   }
 
+  // 메모리 캐시: 제목 -> thumbnail URL
+  final Map<String, String> _thumbCache = {};
+
+  // 제목으로 Google Books에서 첫 결과의 thumbnail 가져오기(캐시 사용)
+  Future<String> _fetchThumbnailForTitle(String title) async {
+    if (title.isEmpty) return "";
+    if (_thumbCache.containsKey(title)) return _thumbCache[title] ?? "";
+    try {
+      final q = Uri.https('www.googleapis.com', '/books/v1/volumes', {
+        'q': 'intitle:${title}',
+        'maxResults': '1',
+      });
+      final res = await http.get(q).timeout(const Duration(seconds: 6));
+      if (res.statusCode == 200) {
+        final json = jsonDecode(res.body) as Map<String, dynamic>;
+        final items = json['items'] as List<dynamic>?;
+        if (items != null && items.isNotEmpty) {
+          final info = items[0]['volumeInfo'] as Map<String, dynamic>?;
+          if (info != null) {
+            final imageLinks = info['imageLinks'] as Map<String, dynamic>?;
+            if (imageLinks != null) {
+              var thumb = (imageLinks['thumbnail'] ?? imageLinks['smallThumbnail'] ?? "").toString();
+              if (thumb.isNotEmpty && thumb.startsWith('http:')) thumb = thumb.replaceFirst('http:', 'https:');
+              _thumbCache[title] = thumb;
+              return thumb;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    _thumbCache[title] = "";
+    return "";
+  }
+
   @override
   Widget build(BuildContext context) {
     if (loading) {
@@ -733,7 +1013,25 @@ class _StatsPageState extends State<StatsPage> {
                   final book = monthEntries[i].key;
                   final minutes = monthEntries[i].value;
                   return ListTile(
-                    leading: CircleAvatar(child: Text("${i + 1}")),
+                    leading: FutureBuilder<String>(
+                      future: _fetchThumbnailForTitle(book),
+                      builder: (ctx, snap) {
+                        final url = snap.data ?? "";
+                        if (url.isEmpty) {
+                          return CircleAvatar(child: Text("${i + 1}"));
+                        }
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: Image.network(
+                            url,
+                            width: 40,
+                            height: 60,
+                            fit: BoxFit.cover,
+                            errorBuilder: (c, e, s) => CircleAvatar(child: Text("${i + 1}")),
+                          ),
+                        );
+                      },
+                    ),
                     title: Text(book),
                     subtitle: Text("총 ${minutes}분"),
                     trailing: Text("${(minutes / 60).toStringAsFixed(1)}h"),
@@ -772,6 +1070,27 @@ class _StatsPageState extends State<StatsPage> {
                           padding: const EdgeInsets.symmetric(vertical: 6),
                           child: Row(
                             children: [
+                              // 소형 썸네일
+                              FutureBuilder<String>(
+                                future: _fetchThumbnailForTitle(book),
+                                builder: (ctx, snap) {
+                                  final url = snap.data ?? "";
+                                  if (url.isEmpty) {
+                                    return Container(width: 36, height: 48, color: Colors.transparent);
+                                  }
+                                  return ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: Image.network(
+                                      url,
+                                      width: 36,
+                                      height: 48,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (c, e, s) => Container(width: 36, height: 48, color: Colors.black12),
+                                    ),
+                                  );
+                                },
+                              ),
+                              const SizedBox(width: 8),
                               Expanded(
                                 flex: 3,
                                 child: Text(book, overflow: TextOverflow.ellipsis),
@@ -849,11 +1168,26 @@ class DummySettingsPage extends StatelessWidget {
           // 추가된 설정: 한 주 시작 지정 (위에 위치)
           ListTile(
             title: const Text("한 주의 시작을 월요일로 할까요?"),
-            subtitle: const Text("켜면 월요일이 주의 첫 날로 표시됩니다(현재 동작하지 않습니다)"),
+            subtitle: const Text("켜면 월요일이 주의 첫 날로 표시됩니다(미작동)"),
             trailing: Switch(
               value: weekStartMonday,
               onChanged: (v) => onWeekStartChanged(v),
             ),
+          ),
+
+          const Divider(height: 1),
+
+          // 독서감상문 항목 추가 (다크모드 위/아래 원하는 위치로 조정 가능)
+          ListTile(
+            title: const Text("독서감상문"),
+            subtitle: const Text("지금까지 읽은 책 목록에서 선택하여 감상문을 작성/관리합니다"),
+            trailing: const Icon(Icons.note_add),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ReviewPage()),
+              );
+            },
           ),
 
           const Divider(height: 1),
@@ -870,3 +1204,256 @@ class DummySettingsPage extends StatelessWidget {
     );
   }
 }
+
+// 새로 추가: ReviewPage (로컬 저장, 4000자 제한)
+class ReviewPage extends StatefulWidget {
+  const ReviewPage({super.key});
+
+  @override
+  State<ReviewPage> createState() => _ReviewPageState();
+}
+
+class _ReviewPageState extends State<ReviewPage> {
+  List<String> titles = [];
+  String? selectedTitle;
+  Map<String, String> reviews = {};
+  final TextEditingController _ctrl = TextEditingController();
+  bool loading = true;
+  // 바이트 제한: 5000바이트
+  final int maxBytes = 5000;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+    // 컨트롤러 리스너: 바이트 초과 시 자르기 및 UI 갱신
+    _ctrl.addListener(() {
+      final cur = _ctrl.text;
+      final trimmed = _trimToBytes(cur, maxBytes);
+      if (trimmed != cur) {
+        // 잘라서 적용, 커서 끝으로 이동
+        _ctrl.text = trimmed;
+        _ctrl.selection = TextSelection.collapsed(offset: trimmed.length);
+      }
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  // 바이트 계산 유틸:
+  // ASCII(<=127) : 1바이트, '\n' : 2바이트, 한글(AC00..D7A3) : 3바이트, 기타 비ASCII : 3바이트로 처리
+  int _byteLength(String s) {
+    var cnt = 0;
+    for (final r in s.runes) {
+      if (r == 10) {
+        cnt += 2;
+      } else if (r >= 0xAC00 && r <= 0xD7A3) {
+        cnt += 3;
+      } else if (r <= 127) {
+        cnt += 1;
+      } else {
+        cnt += 3;
+      }
+    }
+    return cnt;
+  }
+
+  // 바이트 제한에 맞춰 문자열을 잘라 반환 (문자 단위로 안전하게 잘라냄)
+  String _trimToBytes(String s, int max) {
+    final buf = StringBuffer();
+    var cnt = 0;
+    for (final r in s.runes) {
+      int add;
+      if (r == 10) {
+        add = 2;
+      } else if (r >= 0xAC00 && r <= 0xD7A3) {
+        add = 3;
+      } else if (r <= 127) {
+        add = 1;
+      } else {
+        add = 3;
+      }
+      if (cnt + add > max) break;
+      buf.write(String.fromCharCode(r));
+      cnt += add;
+    }
+    return buf.toString();
+  }
+
+  Future<void> _loadData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final recordsStr = prefs.getString("records");
+    final Map<String, String> loadedReviews = {};
+    final reviewsStr = prefs.getString("reviews");
+    if (reviewsStr != null) {
+      try {
+        final decoded = jsonDecode(reviewsStr) as Map<String, dynamic>;
+        decoded.forEach((k, v) {
+          loadedReviews[k] = v?.toString() ?? "";
+        });
+      } catch (_) {}
+    }
+
+    final Set<String> titleSet = {};
+    if (recordsStr != null) {
+      try {
+        final raw = jsonDecode(recordsStr) as Map<String, dynamic>;
+        raw.forEach((k, v) {
+          if (v is Map) {
+            if (v.containsKey("books")) {
+              final books = (v["books"] is List)
+                  ? List<String>.from(v["books"].map((e) => e.toString()))
+                  : <String>[];
+              for (var b in books) {
+                final t = b.trim();
+                if (t.isNotEmpty) titleSet.add(t);
+              }
+            } else {
+              final bookStr = v["book"]?.toString() ?? "";
+              final books = bookStr.trim().isEmpty
+                  ? <String>[]
+                  : bookStr.split(",").map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+              for (var b in books) {
+                final t = b.trim();
+                if (t.isNotEmpty) titleSet.add(t);
+              }
+            }
+          }
+        });
+      } catch (_) {}
+    }
+
+    // 리뷰에만 존재하는 제목도 목록에 포함
+    titleSet.addAll(loadedReviews.keys.where((e) => e.trim().isNotEmpty));
+
+    final list = titleSet.toList()..sort((a, b) => a.compareTo(b));
+
+    setState(() {
+      titles = list;
+      reviews = loadedReviews;
+      selectedTitle = titles.isNotEmpty ? titles.first : null;
+      _ctrl.text = selectedTitle != null ? (reviews[selectedTitle] ?? "") : "";
+      loading = false;
+    });
+  }
+
+  Future<void> _saveReview() async {
+    if (selectedTitle == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final text = _ctrl.text.trim();
+    if (text.isEmpty) {
+      reviews.remove(selectedTitle);
+    } else {
+      // 바이트 제한에 맞춰 잘라 저장
+      final clipped = _trimToBytes(text, maxBytes);
+      reviews[selectedTitle!] = clipped;
+    }
+    await prefs.setString("reviews", jsonEncode(reviews));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("저장되었습니다")));
+    setState(() {});
+  }
+
+  Future<void> _deleteReview() async {
+    if (selectedTitle == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    reviews.remove(selectedTitle);
+    await prefs.setString("reviews", jsonEncode(reviews));
+    _ctrl.clear();
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("삭제되었습니다")));
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return Scaffold(
+        appBar: AppBar(title: const Text("독서감상문")),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(title: const Text("독서감상문")),
+      body: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: titles.isEmpty
+            ? Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const [
+                  Text("기록된 책이 없습니다.\n먼저 캘린더에 읽은 책을 추가해 주세요.", textAlign: TextAlign.center),
+                ],
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text("책 선택", style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  DropdownButton<String>(
+                    value: selectedTitle,
+                    isExpanded: true,
+                    items: titles.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                    onChanged: (v) {
+                      setState(() {
+                        selectedTitle = v;
+                        _ctrl.text = v != null ? (reviews[v] ?? "") : "";
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  const Text("감상문 (최대 5000바이트)"),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: _ctrl,
+                      maxLines: null,
+                      expands: true,
+                      decoration: InputDecoration(
+                        border: OutlineInputBorder(),
+                        hintText: "여기에 감상문을 작성하세요.",
+                        helperText: "${_byteLength(_ctrl.text)} / $maxBytes bytes",
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: _saveReview,
+                        icon: const Icon(Icons.save),
+                        label: const Text("저장"),
+                      ),
+                      const SizedBox(width: 12),
+                      TextButton.icon(
+                        onPressed: () async {
+                          final confirm = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: const Text("삭제 확인"),
+                              content: const Text("이 감상문을 삭제하시겠습니까?"),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("취소")),
+                                TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("삭제")),
+                              ],
+                            ),
+                          );
+                          if (confirm == true) {
+                            await _deleteReview();
+                          }
+                        },
+                        icon: const Icon(Icons.delete),
+                        label: const Text("삭제"),
+                      ),
+                    ],
+                  )
+                ],
+              ),
+      ),
+    );
+  }
+}
+
